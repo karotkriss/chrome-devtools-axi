@@ -1048,19 +1048,13 @@ describe("handleBridgeRequest /call error + roots", () => {
 
   it("negotiates the payload's roots before invoking the tool (#96)", async () => {
     let appliedRoots: string[] | undefined;
-    let appliedBeforeCall = false;
-    let called = false;
     const client: BridgeClient = {
       listTools: async () => ({ tools: [] }),
-      callTool: async () => {
-        called = true;
+      callTool: async (_request, roots) => {
+        appliedRoots = roots;
         return { content: [{ type: "text", text: "ok" }] };
       },
       close: async () => {},
-      applyRoots: async (dirs) => {
-        appliedRoots = dirs;
-        appliedBeforeCall = !called;
-      },
     };
     const { res, captured } = makeResponse();
 
@@ -1080,7 +1074,6 @@ describe("handleBridgeRequest /call error + roots", () => {
     );
 
     expect(appliedRoots).toEqual(["/w", "/home/u"]);
-    expect(appliedBeforeCall).toBe(true);
     expect(captured.statusCode).toBe(200);
     expect(JSON.parse(captured.body)).toEqual({ result: "ok" });
   });
@@ -1152,6 +1145,65 @@ describe("createRootsAwareBridgeClient", () => {
     expect(listed.roots.map((r) => r.uri)).toEqual([
       pathToFileURL("/w").href,
       pathToFileURL("/home/u").href,
+    ]);
+  });
+
+  it("keeps each roots negotiation atomic with its concurrent tool call", async () => {
+    let rootsListHandler: (() => { roots: Array<{ uri: string }> }) | null =
+      null;
+    let releaseFirstCall: (() => void) | undefined;
+    let firstCallStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => {
+      firstCallStarted = resolve;
+    });
+    const firstRelease = new Promise<void>((resolve) => {
+      releaseFirstCall = resolve;
+    });
+    const observed: Array<{ name: string; roots: string[] }> = [];
+    const client = {
+      setRequestHandler: (
+        _schema: unknown,
+        handler: () => { roots: Array<{ uri: string }> },
+      ) => {
+        rootsListHandler = handler;
+      },
+      notification: async () => {
+        rootsListHandler?.();
+      },
+      listTools: async () => ({ tools: [] }),
+      callTool: async ({ name }: { name: string }) => {
+        observed.push({
+          name,
+          roots: rootsListHandler?.().roots.map((root) => root.uri) ?? [],
+        });
+        if (name === "first") {
+          firstCallStarted?.();
+          await firstRelease;
+        }
+        return { content: [] };
+      },
+      close: async () => {},
+    };
+    const rootsClient = createRootsAwareBridgeClient(client as any);
+
+    const first = rootsClient.callTool(
+      { name: "first", arguments: {} },
+      ["/a"],
+    );
+    await firstStarted;
+    const second = rootsClient.callTool(
+      { name: "second", arguments: {} },
+      ["/b"],
+    );
+
+    expect(observed).toEqual([
+      { name: "first", roots: [pathToFileURL("/a").href] },
+    ]);
+    releaseFirstCall?.();
+    await Promise.all([first, second]);
+    expect(observed).toEqual([
+      { name: "first", roots: [pathToFileURL("/a").href] },
+      { name: "second", roots: [pathToFileURL("/b").href] },
     ]);
   });
 });

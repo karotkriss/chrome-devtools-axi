@@ -73,7 +73,7 @@ export interface BridgeClient {
   callTool(request: {
     name: string;
     arguments: Record<string, unknown>;
-  }): Promise<unknown>;
+  }, roots?: string[]): Promise<unknown>;
   close(): Promise<void>;
   /**
    * Negotiate the MCP workspace roots to the given absolute directories before
@@ -373,16 +373,13 @@ async function handleCallRequest(
 ): Promise<void> {
   const body = await readRequestBody(req);
   const payload = parseBridgeCallPayload(body);
-  // Negotiate the workspace roots this call needs (the caller's cwd plus any
-  // output directory) before invoking the tool, so a write outside the OS temp
-  // directory is not denied by chrome-devtools-mcp's validatePath (issue #96).
-  if (payload.roots && client.applyRoots) {
-    await client.applyRoots(payload.roots);
-  }
-  const result = await client.callTool({
-    name: payload.name,
-    arguments: payload.args,
-  });
+  const result = await client.callTool(
+    {
+      name: payload.name,
+      arguments: payload.args,
+    },
+    payload.roots,
+  );
   const text = extractToolText(getToolContent(result));
   if (isToolResultError(result)) {
     // Surface the tool's own failure text as an error so the CLI throws and
@@ -739,6 +736,7 @@ function rootUrisEqual(
 export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
   let currentRoots: Array<{ uri: string; name: string }> = [];
   let onRootsFetched: (() => void) | null = null;
+  let callQueue = Promise.resolve();
 
   client.setRequestHandler(ListRootsRequestSchema, () => {
     const notify = onRootsFetched;
@@ -747,25 +745,40 @@ export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
     return { roots: currentRoots };
   });
 
+  async function applyRootsNow(dirs: string[]): Promise<void> {
+    const next = toRoots(dirs);
+    if (rootUrisEqual(next, currentRoots)) return;
+    currentRoots = next;
+    const fetched = new Promise<void>((resolveFetched) => {
+      onRootsFetched = resolveFetched;
+    });
+    await client.notification({
+      method: "notifications/roots/list_changed",
+    });
+    await Promise.race([
+      fetched,
+      new Promise<void>((r) => setTimeout(r, ROOTS_FETCH_WAIT_MS)),
+    ]);
+  }
+
+  function enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = callQueue.then(operation);
+    callQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   return {
     listTools: () => client.listTools(),
-    callTool: (request) => client.callTool(request),
+    callTool: (request, roots) =>
+      enqueue(async () => {
+        if (roots) await applyRootsNow(roots);
+        return client.callTool(request);
+      }),
     close: () => client.close(),
-    async applyRoots(dirs: string[]): Promise<void> {
-      const next = toRoots(dirs);
-      if (rootUrisEqual(next, currentRoots)) return;
-      currentRoots = next;
-      const fetched = new Promise<void>((resolveFetched) => {
-        onRootsFetched = resolveFetched;
-      });
-      await client.notification({
-        method: "notifications/roots/list_changed",
-      });
-      await Promise.race([
-        fetched,
-        new Promise<void>((r) => setTimeout(r, ROOTS_FETCH_WAIT_MS)),
-      ]);
-    },
+    applyRoots: (dirs) => enqueue(() => applyRootsNow(dirs)),
   };
 }
 
