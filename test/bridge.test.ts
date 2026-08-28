@@ -1187,6 +1187,43 @@ describe("createRootsAwareBridgeClient", () => {
     }
   });
 
+  it("renegotiates previously confirmed roots after ambiguous failure", async () => {
+    const firstRoot = resolve("first-root");
+    const secondRoot = resolve("second-root");
+    let rootsListHandler: (() => { roots: unknown }) | null = null;
+    let pingCalls = 0;
+    const notifications: Array<{ method: string }> = [];
+    const client = {
+      setRequestHandler: (
+        _schema: unknown,
+        handler: () => { roots: unknown },
+      ) => {
+        rootsListHandler = handler;
+      },
+      notification: async (notification: { method: string }) => {
+        notifications.push(notification);
+        rootsListHandler?.();
+      },
+      ping: async () => {
+        pingCalls += 1;
+        if (pingCalls === 2) throw new Error("confirmation failed");
+        return {};
+      },
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => ({ content: [] }),
+      close: async () => {},
+    };
+    const rootsClient = createRootsAwareBridgeClient(client as any);
+
+    await rootsClient.applyRoots([firstRoot]);
+    await expect(rootsClient.applyRoots([secondRoot])).rejects.toThrow(
+      "confirmation failed",
+    );
+    await rootsClient.applyRoots([firstRoot]);
+
+    expect(notifications).toHaveLength(3);
+  });
+
   it("de-duplicates repeated directories", async () => {
     const workspaceRoot = resolve("workspace");
     const homeRoot = resolve("home", "user");

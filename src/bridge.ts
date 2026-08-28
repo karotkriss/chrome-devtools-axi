@@ -738,7 +738,7 @@ function rootUrisEqual(
  */
 export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
   let currentRoots: Array<{ uri: string; name: string }> = [];
-  let confirmedRoots: Array<{ uri: string; name: string }> = [];
+  let confirmedRoots: Array<{ uri: string; name: string }> | null = [];
   let onRootsFetched: {
     resolve: () => void;
     reject: (error: unknown) => void;
@@ -758,7 +758,8 @@ export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
 
   async function applyRootsNow(dirs: string[]): Promise<void> {
     const next = toRoots(dirs);
-    if (rootUrisEqual(next, confirmedRoots)) return;
+    if (confirmedRoots && rootUrisEqual(next, confirmedRoots)) return;
+    confirmedRoots = null;
     currentRoots = next;
     let waiter:
       | { resolve: () => void; reject: (error: unknown) => void }
