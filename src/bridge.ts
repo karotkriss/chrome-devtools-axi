@@ -735,13 +735,19 @@ function rootUrisEqual(
  */
 export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
   let currentRoots: Array<{ uri: string; name: string }> = [];
-  let onRootsFetched: (() => void) | null = null;
+  let onRootsFetched:
+    | { resolve: () => void; reject: (error: unknown) => void }
+    | null = null;
   let callQueue = Promise.resolve();
 
   client.setRequestHandler(ListRootsRequestSchema, () => {
     const notify = onRootsFetched;
     onRootsFetched = null;
-    notify?.();
+    if (notify) {
+      setImmediate(() => {
+        void client.ping().then(notify.resolve, notify.reject);
+      });
+    }
     return { roots: currentRoots };
   });
 
@@ -749,16 +755,31 @@ export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
     const next = toRoots(dirs);
     if (rootUrisEqual(next, currentRoots)) return;
     currentRoots = next;
-    const fetched = new Promise<void>((resolveFetched) => {
-      onRootsFetched = resolveFetched;
+    let waiter:
+      | { resolve: () => void; reject: (error: unknown) => void }
+      | undefined;
+    const fetched = new Promise<void>((resolve, reject) => {
+      waiter = { resolve, reject };
+      onRootsFetched = waiter;
     });
     await client.notification({
       method: "notifications/roots/list_changed",
     });
-    await Promise.race([
-      fetched,
-      new Promise<void>((r) => setTimeout(r, ROOTS_FETCH_WAIT_MS)),
-    ]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        fetched,
+        new Promise<void>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("Timed out waiting for roots negotiation")),
+            ROOTS_FETCH_WAIT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (onRootsFetched === waiter) onRootsFetched = null;
+    }
   }
 
   function enqueue<T>(operation: () => Promise<T>): Promise<T> {

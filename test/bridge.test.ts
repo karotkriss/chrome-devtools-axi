@@ -1095,6 +1095,7 @@ describe("createRootsAwareBridgeClient", () => {
         notifications.push(n);
         rootsListHandler?.();
       },
+      ping: async () => ({}),
       listTools: async () => ({ tools: [] }),
       callTool: async () => ({ content: [] }),
       close: async () => {},
@@ -1170,6 +1171,7 @@ describe("createRootsAwareBridgeClient", () => {
       notification: async () => {
         rootsListHandler?.();
       },
+      ping: async () => ({}),
       listTools: async () => ({ tools: [] }),
       callTool: async ({ name }: { name: string }) => {
         observed.push({
@@ -1205,6 +1207,43 @@ describe("createRootsAwareBridgeClient", () => {
       { name: "first", roots: [pathToFileURL("/a").href] },
       { name: "second", roots: [pathToFileURL("/b").href] },
     ]);
+  });
+
+  it("completes a server round trip after returning updated roots", async () => {
+    let rootsListHandler: (() => { roots: unknown }) | null = null;
+    let rootsResponseReturned = false;
+    const events: string[] = [];
+    const client = {
+      setRequestHandler: (
+        _schema: unknown,
+        handler: () => { roots: unknown },
+      ) => {
+        rootsListHandler = handler;
+      },
+      notification: async () => {
+        rootsListHandler?.();
+        rootsResponseReturned = true;
+      },
+      ping: async () => {
+        expect(rootsResponseReturned).toBe(true);
+        events.push("ping");
+        return {};
+      },
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => {
+        events.push("tool");
+        return { content: [] };
+      },
+      close: async () => {},
+    };
+    const rootsClient = createRootsAwareBridgeClient(client as any);
+
+    await rootsClient.callTool(
+      { name: "take_screenshot", arguments: {} },
+      ["/w"],
+    );
+
+    expect(events).toEqual(["ping", "tool"]);
   });
 });
 
