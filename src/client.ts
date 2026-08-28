@@ -5,6 +5,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { request } from "node:http";
+import { dirname } from "node:path";
 import { AxiError } from "axi-sdk-js";
 import {
   BRIDGE_PORT_IN_USE_EXIT_CODE,
@@ -507,10 +508,45 @@ async function postTool(
   port: number,
   name: string,
   args: Record<string, unknown>,
-  timeoutMs?: number,
+  opts: { roots?: string[]; timeoutMs?: number } = {},
 ): Promise<string> {
-  const resp = await httpPost(port, "/call", { name, args }, timeoutMs);
+  const body: Record<string, unknown> = { name, args };
+  if (opts.roots && opts.roots.length > 0) body.roots = opts.roots;
+  const resp = await httpPost(port, "/call", body, opts.timeoutMs);
   return parseCallResponse(resp);
+}
+
+/**
+ * Tool argument keys whose value is a caller-supplied output path, resolved to
+ * an absolute path by `resolveOutputPath` before it reaches here. Their parent
+ * directory (or, for a directory argument, the directory itself) is negotiated
+ * as an MCP workspace root so the write is not restricted to the OS temp
+ * directory (issue #96). Add a key here when a new file-writing tool argument
+ * is introduced.
+ */
+const FILE_PATH_ARG_KEYS = [
+  "filePath",
+  "responseFilePath",
+  "requestFilePath",
+] as const;
+const DIR_PATH_ARG_KEYS = ["outputDirPath"] as const;
+
+/**
+ * The workspace roots a call needs: always the invoking cwd (so writes under it
+ * pass), plus the directory of any output path argument (so a write outside cwd,
+ * e.g. `$HOME/a.png`, passes too).
+ */
+export function collectRootDirs(args: Record<string, unknown>): string[] {
+  const dirs = new Set<string>([process.cwd()]);
+  for (const key of FILE_PATH_ARG_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value.length > 0) dirs.add(dirname(value));
+  }
+  for (const key of DIR_PATH_ARG_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value.length > 0) dirs.add(value);
+  }
+  return [...dirs];
 }
 
 /**
@@ -555,7 +591,9 @@ export async function callTool(
 
   try {
     const resolved = resolveToolArgs(name, args);
-    const result = await postTool(port, name, resolved);
+    const result = await postTool(port, name, resolved, {
+      roots: collectRootDirs(resolved),
+    });
     rememberToolRouting(name, resolved, result);
     return result;
   } catch (err) {
@@ -626,7 +664,12 @@ export async function getSessionSnapshotIfRunning(): Promise<string | null> {
   try {
     const pageId = getSelectedPageId();
     if (pageId === null) return null;
-    return await postTool(pidInfo.port, "take_snapshot", { pageId }, 5000);
+    return await postTool(
+      pidInfo.port,
+      "take_snapshot",
+      { pageId },
+      { timeoutMs: 5000 },
+    );
   } catch {
     return null;
   }

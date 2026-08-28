@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   BRIDGE_PORT_IN_USE_EXIT_CODE,
   buildTransportArgs,
+  createRootsAwareBridgeClient,
   detectGlobalMcpPath,
   extractHostHeaderHostname,
   extractToolText,
@@ -15,6 +16,7 @@ import {
   isAllowedBridgeHost,
   isRequestAllowed,
   isRequestOriginAllowed,
+  isToolResultError,
   handleBridgeServerError,
   isBridgeClientConnected,
   isBridgeTargetReachable,
@@ -24,6 +26,7 @@ import {
   resolveTransportSpec,
   type BridgeClient,
 } from "../src/bridge.js";
+import { pathToFileURL } from "node:url";
 
 describe("extractToolText", () => {
   it("joins text blocks and ignores non-text content", () => {
@@ -54,6 +57,37 @@ describe("parseBridgeCallPayload", () => {
     expect(() => parseBridgeCallPayload("{")).toThrow(
       "Invalid bridge request payload",
     );
+  });
+
+  it("parses an optional roots array of directories", () => {
+    const result = parseBridgeCallPayload(
+      '{"name":"take_screenshot","args":{"filePath":"/w/a.png"},"roots":["/w","/home/u"]}',
+    );
+
+    expect(result).toEqual({
+      name: "take_screenshot",
+      args: { filePath: "/w/a.png" },
+      roots: ["/w", "/home/u"],
+    });
+  });
+
+  it("rejects a roots field that is not an array of non-empty strings", () => {
+    expect(() =>
+      parseBridgeCallPayload('{"name":"x","roots":["/w",""]}'),
+    ).toThrow("Invalid bridge request payload");
+    expect(() => parseBridgeCallPayload('{"name":"x","roots":"/w"}')).toThrow(
+      "Invalid bridge request payload",
+    );
+  });
+});
+
+describe("isToolResultError", () => {
+  it("is true only when the result carries isError: true", () => {
+    expect(isToolResultError({ isError: true, content: [] })).toBe(true);
+    expect(isToolResultError({ isError: false, content: [] })).toBe(false);
+    expect(isToolResultError({ content: [] })).toBe(false);
+    expect(isToolResultError(null)).toBe(false);
+    expect(isToolResultError("boom")).toBe(false);
   });
 });
 
@@ -975,6 +1009,150 @@ describe("handleBridgeRequest anti-rebinding gate", () => {
 
     expect(captured.statusCode).toBe(200);
     expect(isRequestAllowed(makeRequest("GET", "/tools"))).toBe(true);
+  });
+});
+
+describe("handleBridgeRequest /call error + roots", () => {
+  it("surfaces an isError tool result as { error } so the CLI fails loudly (#96)", async () => {
+    const client: BridgeClient = {
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => ({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Error: Access denied: path /home/u/a.png is not within any of the configured workspace roots.",
+          },
+        ],
+      }),
+      close: async () => {},
+    };
+    const { res, captured } = makeResponse();
+
+    await handleBridgeRequest(
+      client,
+      makeRequest(
+        "POST",
+        "/call",
+        { host: "127.0.0.1:9224" },
+        JSON.stringify({ name: "take_screenshot", args: { filePath: "x" } }),
+      ),
+      res,
+    );
+
+    expect(captured.statusCode).toBe(200);
+    const body = JSON.parse(captured.body);
+    expect(body.result).toBeUndefined();
+    expect(body.error).toContain("Access denied");
+  });
+
+  it("negotiates the payload's roots before invoking the tool (#96)", async () => {
+    let appliedRoots: string[] | undefined;
+    let appliedBeforeCall = false;
+    let called = false;
+    const client: BridgeClient = {
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => {
+        called = true;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      close: async () => {},
+      applyRoots: async (dirs) => {
+        appliedRoots = dirs;
+        appliedBeforeCall = !called;
+      },
+    };
+    const { res, captured } = makeResponse();
+
+    await handleBridgeRequest(
+      client,
+      makeRequest(
+        "POST",
+        "/call",
+        { host: "127.0.0.1:9224" },
+        JSON.stringify({
+          name: "take_screenshot",
+          args: { filePath: "/w/a.png" },
+          roots: ["/w", "/home/u"],
+        }),
+      ),
+      res,
+    );
+
+    expect(appliedRoots).toEqual(["/w", "/home/u"]);
+    expect(appliedBeforeCall).toBe(true);
+    expect(captured.statusCode).toBe(200);
+    expect(JSON.parse(captured.body)).toEqual({ result: "ok" });
+  });
+});
+
+describe("createRootsAwareBridgeClient", () => {
+  function makeFakeMcpClient() {
+    let rootsListHandler: (() => { roots: unknown }) | null = null;
+    const notifications: Array<{ method: string }> = [];
+    const client = {
+      setRequestHandler: (
+        _schema: unknown,
+        handler: () => { roots: unknown },
+      ) => {
+        rootsListHandler = handler;
+      },
+      // Simulate chrome-devtools-mcp re-reading roots after a list_changed.
+      notification: async (n: { method: string }) => {
+        notifications.push(n);
+        rootsListHandler?.();
+      },
+      listTools: async () => ({ tools: [] }),
+      callTool: async () => ({ content: [] }),
+      close: async () => {},
+    };
+    return {
+      client,
+      notifications,
+      invokeRootsList: () => rootsListHandler?.(),
+    };
+  }
+
+  it("answers roots/list with the negotiated directories as file URIs", async () => {
+    const fake = makeFakeMcpClient();
+    const rootsClient = createRootsAwareBridgeClient(fake.client as any);
+
+    await rootsClient.applyRoots(["/home/u/proj", "/tmp/out"]);
+
+    expect(fake.notifications).toEqual([
+      { method: "notifications/roots/list_changed" },
+    ]);
+    expect(fake.invokeRootsList()).toEqual({
+      roots: [
+        { uri: pathToFileURL("/home/u/proj").href, name: "proj" },
+        { uri: pathToFileURL("/tmp/out").href, name: "out" },
+      ],
+    });
+  });
+
+  it("does not re-notify when the roots are unchanged", async () => {
+    const fake = makeFakeMcpClient();
+    const rootsClient = createRootsAwareBridgeClient(fake.client as any);
+
+    await rootsClient.applyRoots(["/w"]);
+    await rootsClient.applyRoots(["/w"]);
+
+    expect(fake.notifications).toHaveLength(1);
+  });
+
+  it("de-duplicates repeated directories", async () => {
+    const fake = makeFakeMcpClient();
+    const rootsClient = createRootsAwareBridgeClient(fake.client as any);
+
+    await rootsClient.applyRoots(["/w", "/w", "/home/u"]);
+
+    const listed = fake.invokeRootsList() as {
+      roots: Array<{ uri: string }>;
+    };
+    expect(listed.roots.map((r) => r.uri)).toEqual([
+      pathToFileURL("/w").href,
+      pathToFileURL("/home/u").href,
+    ]);
   });
 });
 

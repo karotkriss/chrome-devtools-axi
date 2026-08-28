@@ -19,6 +19,7 @@ import {
   callTool,
   CdpError,
   checkBridgeHealth,
+  collectRootDirs,
   ensureBridge,
   getSessionSnapshotIfRunning,
   mapErrorMessage,
@@ -627,15 +628,24 @@ interface FakeCallBridgeOptions {
   listPages?: string;
   result?: string;
   toolResults?: Record<string, string>;
+  /**
+   * Tool names that should respond with an `{ error }` body, mirroring how the
+   * real bridge surfaces an MCP `isError` result. Used to assert the CLI turns
+   * a tool failure into a thrown error rather than silent success (issue #96).
+   */
+  toolErrors?: Record<string, string>;
 }
 
 function startFakeCallBridge(opts: FakeCallBridgeOptions): Promise<{
   port: number;
   calls: { name: string; args: Record<string, unknown> }[];
+  /** The `roots` field seen on each `/call`, in lockstep with `calls`. */
+  roots: (string[] | undefined)[];
   close: () => Promise<void>;
 }> {
   return new Promise((resolveStart, rejectStart) => {
     const calls: { name: string; args: Record<string, unknown> }[] = [];
+    const roots: (string[] | undefined)[] = [];
     const server = createServer((req, res) => {
       if (req.method === "GET" && req.url?.startsWith("/health")) {
         res.setHeader("Content-Type", "application/json");
@@ -652,9 +662,16 @@ function startFakeCallBridge(opts: FakeCallBridgeOptions): Promise<{
           const payload = JSON.parse(body) as {
             name: string;
             args?: Record<string, unknown>;
+            roots?: string[];
           };
           calls.push({ name: payload.name, args: payload.args ?? {} });
+          roots.push(payload.roots);
           res.setHeader("Content-Type", "application/json");
+          const error = opts.toolErrors?.[payload.name];
+          if (error !== undefined) {
+            res.end(JSON.stringify({ error }));
+            return;
+          }
           if (payload.name === "list_pages") {
             res.end(
               JSON.stringify({
@@ -677,6 +694,7 @@ function startFakeCallBridge(opts: FakeCallBridgeOptions): Promise<{
       resolveStart({
         port,
         calls,
+        roots,
         close: () =>
           new Promise<void>((closeResolve) => {
             server.close(() => closeResolve());
@@ -1016,5 +1034,65 @@ describe("callTool pageId routing", () => {
       },
       { listPages: "## Pages\n0: https://a.com/ [selected]" },
     );
+  });
+
+  it("surfaces a tool error result as a thrown CdpError instead of silent success (#96)", async () => {
+    await withFakeBridge(
+      async () => {
+        await callTool("select_page", { pageId: 1 });
+        await expect(
+          callTool("take_screenshot", { filePath: "/tmp/x.png" }),
+        ).rejects.toMatchObject({
+          name: "CdpError",
+          message: expect.stringContaining("Access denied"),
+        });
+      },
+      {
+        toolErrors: {
+          take_screenshot:
+            "Error: Access denied: path /tmp/x.png is not within any of the configured workspace roots.",
+        },
+      },
+    );
+  });
+
+  it("negotiates workspace roots (cwd + output dir) on a file-writing call (#96)", async () => {
+    await withFakeBridge(async (fake) => {
+      await callTool("select_page", { pageId: 1 });
+      await callTool("take_screenshot", { filePath: "/var/tmp/shots/x.png" });
+      const idx = fake.calls.findIndex((c) => c.name === "take_screenshot");
+      expect(idx).toBeGreaterThanOrEqual(0);
+      const roots = fake.roots[idx];
+      expect(roots).toContain(process.cwd());
+      expect(roots).toContain(dirname("/var/tmp/shots/x.png"));
+    });
+  });
+});
+
+describe("collectRootDirs", () => {
+  it("always includes the invoking cwd", () => {
+    expect(collectRootDirs({})).toEqual([process.cwd()]);
+  });
+
+  it("adds the parent directory of each output file path argument", () => {
+    const roots = collectRootDirs({
+      filePath: "/home/user/out/shot.png",
+      responseFilePath: "/data/resp.json",
+      requestFilePath: "/data/req.json",
+    });
+    expect(roots).toContain(process.cwd());
+    expect(roots).toContain("/home/user/out");
+    expect(roots).toContain("/data");
+  });
+
+  it("adds an output directory argument as a root directly", () => {
+    const roots = collectRootDirs({ outputDirPath: "/reports/run-1" });
+    expect(roots).toEqual([process.cwd(), "/reports/run-1"]);
+  });
+
+  it("ignores non-string and empty path arguments", () => {
+    expect(collectRootDirs({ filePath: "", outputDirPath: 42 })).toEqual([
+      process.cwd(),
+    ]);
   });
 });
