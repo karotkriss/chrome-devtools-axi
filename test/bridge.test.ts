@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -1132,6 +1132,39 @@ describe("createRootsAwareBridgeClient", () => {
     await rootsClient.applyRoots(["/w"]);
 
     expect(fake.notifications).toHaveLength(1);
+  });
+
+  it("retries unchanged roots after a fetch times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const notifications: Array<{ method: string }> = [];
+      const client = {
+        setRequestHandler: () => {},
+        notification: async (notification: { method: string }) => {
+          notifications.push(notification);
+        },
+        ping: async () => ({}),
+        listTools: async () => ({ tools: [] }),
+        callTool: async () => ({ content: [] }),
+        close: async () => {},
+      };
+      const rootsClient = createRootsAwareBridgeClient(client as any);
+
+      const first = expect(rootsClient.applyRoots(["/w"])).rejects.toThrow(
+        "Timed out waiting for roots negotiation",
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      await first;
+      const second = expect(rootsClient.applyRoots(["/w"])).rejects.toThrow(
+        "Timed out waiting for roots negotiation",
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      await second;
+
+      expect(notifications).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("de-duplicates repeated directories", async () => {
