@@ -1187,6 +1187,31 @@ describe("createRootsAwareBridgeClient", () => {
     }
   });
 
+  it("times out when sending the roots notification stalls", async () => {
+    const workspaceRoot = resolve("workspace");
+    vi.useFakeTimers();
+    try {
+      const client = {
+        setRequestHandler: () => {},
+        notification: () => new Promise<void>(() => {}),
+        ping: async () => ({}),
+        listTools: async () => ({ tools: [] }),
+        callTool: async () => ({ content: [] }),
+        close: async () => {},
+      };
+      const rootsClient = createRootsAwareBridgeClient(client as any);
+
+      const negotiation = expect(
+        rootsClient.applyRoots([workspaceRoot]),
+      ).rejects.toThrow("Timed out waiting for roots negotiation");
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      await negotiation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renegotiates previously confirmed roots after ambiguous failure", async () => {
     const firstRoot = resolve("first-root");
     const secondRoot = resolve("second-root");

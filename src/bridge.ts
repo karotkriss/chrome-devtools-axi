@@ -768,13 +768,15 @@ export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
       waiter = { resolve, reject };
       onRootsFetched = waiter;
     });
-    await client.notification({
-      method: "notifications/roots/list_changed",
-    });
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        fetched,
+        (async () => {
+          await client.notification({
+            method: "notifications/roots/list_changed",
+          });
+          await fetched;
+        })(),
         new Promise<void>((_resolve, reject) => {
           timeout = setTimeout(
             () => reject(new Error("Timed out waiting for roots negotiation")),
