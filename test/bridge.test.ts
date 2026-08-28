@@ -1221,15 +1221,13 @@ describe("createRootsAwareBridgeClient", () => {
     };
     const rootsClient = createRootsAwareBridgeClient(client as any);
 
-    const first = rootsClient.callTool(
-      { name: "first", arguments: {} },
-      ["/a"],
-    );
+    const first = rootsClient.callTool({ name: "first", arguments: {} }, [
+      "/a",
+    ]);
     await firstStarted;
-    const second = rootsClient.callTool(
-      { name: "second", arguments: {} },
-      ["/b"],
-    );
+    const second = rootsClient.callTool({ name: "second", arguments: {} }, [
+      "/b",
+    ]);
 
     expect(observed).toEqual([
       { name: "first", roots: [pathToFileURL("/a").href] },
@@ -1271,10 +1269,9 @@ describe("createRootsAwareBridgeClient", () => {
     };
     const rootsClient = createRootsAwareBridgeClient(client as any);
 
-    await rootsClient.callTool(
-      { name: "take_screenshot", arguments: {} },
-      ["/w"],
-    );
+    await rootsClient.callTool({ name: "take_screenshot", arguments: {} }, [
+      "/w",
+    ]);
 
     expect(events).toEqual(["ping", "tool"]);
   });

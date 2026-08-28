@@ -518,10 +518,11 @@ async function postTool(
 
 /**
  * Tool argument keys whose value is a caller-supplied output path, resolved to
- * an absolute path by `resolveOutputPath` before it reaches here. Their parent
- * directory (or, for a directory argument, the directory itself) is negotiated
- * as an MCP workspace root so the write is not restricted to the OS temp
- * directory (issue #96). Add a key here when a new file-writing tool argument
+ * an absolute path by `resolveOutputPath` before it reaches here. The nearest
+ * existing ancestor of their parent directory (or of a directory argument
+ * itself) is negotiated as an MCP workspace root, so the write is not restricted
+ * to the OS temp directory and missing directories can be created beneath an
+ * allowed root (issue #96). Add a key here when a new file-writing tool argument
  * is introduced.
  */
 const FILE_OUTPUT_ARGS_BY_TOOL = new Map<string, readonly string[]>([
@@ -547,8 +548,8 @@ function nearestExistingAncestor(path: string): string {
 
 /**
  * The workspace roots a call needs: always the invoking cwd (so writes under it
- * pass), plus the directory of any output path argument (so a write outside cwd,
- * e.g. `$HOME/a.png`, passes too).
+ * pass), plus the nearest existing ancestor of any output path argument (so a
+ * write outside cwd, e.g. `$HOME/a.png`, passes too).
  */
 export function collectRootDirs(
   name: string,

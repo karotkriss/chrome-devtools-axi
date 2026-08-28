@@ -70,10 +70,13 @@ interface BridgeToolDescription {
 
 export interface BridgeClient {
   listTools(): Promise<{ tools: BridgeToolDescription[] }>;
-  callTool(request: {
-    name: string;
-    arguments: Record<string, unknown>;
-  }, roots?: string[]): Promise<unknown>;
+  callTool(
+    request: {
+      name: string;
+      arguments: Record<string, unknown>;
+    },
+    roots?: string[],
+  ): Promise<unknown>;
   close(): Promise<void>;
   /**
    * Negotiate the MCP workspace roots to the given absolute directories before
@@ -736,9 +739,10 @@ function rootUrisEqual(
 export function createRootsAwareBridgeClient(client: Client): RootsAwareClient {
   let currentRoots: Array<{ uri: string; name: string }> = [];
   let confirmedRoots: Array<{ uri: string; name: string }> = [];
-  let onRootsFetched:
-    | { resolve: () => void; reject: (error: unknown) => void }
-    | null = null;
+  let onRootsFetched: {
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  } | null = null;
   let callQueue = Promise.resolve();
 
   client.setRequestHandler(ListRootsRequestSchema, () => {
