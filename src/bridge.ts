@@ -30,7 +30,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   BRIDGE_PORT_IN_USE_EXIT_CODE,
@@ -321,16 +321,16 @@ export function parseBridgeCallPayload(body: string): BridgeCallPayload {
 }
 
 /**
- * Validate the optional `roots` field: absent, or an array of non-empty
- * strings. Any other shape is a malformed payload and is rejected loudly
- * rather than silently dropped, so a client bug can't quietly disable roots
- * negotiation.
+ * Validate the optional `roots` field: absent, or an array of absolute
+ * directory paths. Any other shape is a malformed payload and is rejected
+ * loudly rather than silently dropped, so a client bug can't quietly disable
+ * roots negotiation or make roots depend on the bridge process's cwd.
  */
 function parseRootsField(roots: unknown): string[] | undefined {
   if (roots === undefined) return undefined;
   if (
     !Array.isArray(roots) ||
-    !roots.every((r) => typeof r === "string" && r.length > 0)
+    !roots.every((r) => typeof r === "string" && isAbsolute(r))
   ) {
     throw new Error("Invalid bridge request payload");
   }

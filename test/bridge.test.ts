@@ -3,7 +3,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   BRIDGE_PORT_IN_USE_EXIT_CODE,
   buildTransportArgs,
@@ -60,24 +60,35 @@ describe("parseBridgeCallPayload", () => {
   });
 
   it("parses an optional roots array of directories", () => {
+    const workspaceRoot = resolve("workspace");
+    const homeRoot = resolve("home", "user");
     const result = parseBridgeCallPayload(
-      '{"name":"take_screenshot","args":{"filePath":"/w/a.png"},"roots":["/w","/home/u"]}',
+      JSON.stringify({
+        name: "take_screenshot",
+        args: { filePath: join(workspaceRoot, "a.png") },
+        roots: [workspaceRoot, homeRoot],
+      }),
     );
 
     expect(result).toEqual({
       name: "take_screenshot",
-      args: { filePath: "/w/a.png" },
-      roots: ["/w", "/home/u"],
+      args: { filePath: join(workspaceRoot, "a.png") },
+      roots: [workspaceRoot, homeRoot],
     });
   });
 
-  it("rejects a roots field that is not an array of non-empty strings", () => {
+  it("rejects roots that are not an array of absolute paths", () => {
     expect(() =>
-      parseBridgeCallPayload('{"name":"x","roots":["/w",""]}'),
+      parseBridgeCallPayload(
+        JSON.stringify({ name: "x", roots: [resolve("workspace"), ""] }),
+      ),
     ).toThrow("Invalid bridge request payload");
     expect(() => parseBridgeCallPayload('{"name":"x","roots":"/w"}')).toThrow(
       "Invalid bridge request payload",
     );
+    expect(() =>
+      parseBridgeCallPayload('{"name":"x","roots":["relative/path"]}'),
+    ).toThrow("Invalid bridge request payload");
   });
 });
 
