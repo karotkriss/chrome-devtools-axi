@@ -1056,43 +1056,66 @@ describe("callTool pageId routing", () => {
     );
   });
 
-  it("negotiates workspace roots (cwd + output dir) on a file-writing call (#96)", async () => {
-    await withFakeBridge(async (fake) => {
-      await callTool("select_page", { pageId: 1 });
-      await callTool("take_screenshot", { filePath: "/var/tmp/shots/x.png" });
-      const idx = fake.calls.findIndex((c) => c.name === "take_screenshot");
-      expect(idx).toBeGreaterThanOrEqual(0);
-      const roots = fake.roots[idx];
-      expect(roots).toContain(process.cwd());
-      expect(roots).toContain(dirname("/var/tmp/shots/x.png"));
-    });
+  it("negotiates the nearest existing output ancestor (#96)", async () => {
+    const outputRoot = mkdtempSync(join(tmpdir(), "axi-output-root-"));
+    try {
+      await withFakeBridge(async (fake) => {
+        await callTool("select_page", { pageId: 1 });
+        await callTool("take_screenshot", {
+          filePath: join(outputRoot, "new", "shots", "x.png"),
+        });
+        const idx = fake.calls.findIndex((c) => c.name === "take_screenshot");
+        expect(idx).toBeGreaterThanOrEqual(0);
+        expect(fake.roots[idx]).toEqual([process.cwd(), outputRoot]);
+      });
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
   });
 });
 
 describe("collectRootDirs", () => {
   it("always includes the invoking cwd", () => {
-    expect(collectRootDirs({})).toEqual([process.cwd()]);
+    expect(collectRootDirs("click", {})).toEqual([process.cwd()]);
   });
 
-  it("adds the parent directory of each output file path argument", () => {
-    const roots = collectRootDirs({
-      filePath: "/home/user/out/shot.png",
-      responseFilePath: "/data/resp.json",
-      requestFilePath: "/data/req.json",
-    });
-    expect(roots).toContain(process.cwd());
-    expect(roots).toContain("/home/user/out");
-    expect(roots).toContain("/data");
+  it("adds roots only for the named tool's output path arguments", () => {
+    const outputRoot = mkdtempSync(join(tmpdir(), "axi-tool-roots-"));
+    try {
+      const networkRoots = collectRootDirs("get_network_request", {
+        responseFilePath: join(outputRoot, "response.json"),
+        requestFilePath: join(outputRoot, "request.json"),
+        filePath: "/private/input.txt",
+      });
+      expect(networkRoots).toEqual([process.cwd(), outputRoot]);
+      expect(
+        collectRootDirs("upload_file", {
+          filePath: "/home/user/.ssh/id_rsa",
+        }),
+      ).toEqual([process.cwd()]);
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
   });
 
-  it("adds an output directory argument as a root directly", () => {
-    const roots = collectRootDirs({ outputDirPath: "/reports/run-1" });
-    expect(roots).toEqual([process.cwd(), "/reports/run-1"]);
+  it("uses the nearest existing ancestor for a new output directory", () => {
+    const outputRoot = mkdtempSync(join(tmpdir(), "axi-dir-root-"));
+    try {
+      const roots = collectRootDirs("lighthouse_audit", {
+        outputDirPath: join(outputRoot, "reports", "run-1"),
+      });
+      expect(roots).toEqual([process.cwd(), outputRoot]);
+    } finally {
+      rmSync(outputRoot, { recursive: true, force: true });
+    }
   });
 
   it("ignores non-string and empty path arguments", () => {
-    expect(collectRootDirs({ filePath: "", outputDirPath: 42 })).toEqual([
-      process.cwd(),
-    ]);
+    expect(
+      collectRootDirs("take_screenshot", {
+        filePath: "",
+        outputDirPath: 42,
+      }),
+    ).toEqual([process.cwd()]);
   });
 });

@@ -524,27 +524,48 @@ async function postTool(
  * directory (issue #96). Add a key here when a new file-writing tool argument
  * is introduced.
  */
-const FILE_PATH_ARG_KEYS = [
-  "filePath",
-  "responseFilePath",
-  "requestFilePath",
-] as const;
-const DIR_PATH_ARG_KEYS = ["outputDirPath"] as const;
+const FILE_OUTPUT_ARGS_BY_TOOL = new Map<string, readonly string[]>([
+  ["take_screenshot", ["filePath"]],
+  ["get_network_request", ["responseFilePath", "requestFilePath"]],
+  ["performance_start_trace", ["filePath"]],
+  ["performance_stop_trace", ["filePath"]],
+  ["take_memory_snapshot", ["filePath"]],
+]);
+const DIR_OUTPUT_ARGS_BY_TOOL = new Map<string, readonly string[]>([
+  ["lighthouse_audit", ["outputDirPath"]],
+]);
+
+function nearestExistingAncestor(path: string): string {
+  let candidate = path;
+  while (!existsSync(candidate)) {
+    const parent = dirname(candidate);
+    if (parent === candidate) return candidate;
+    candidate = parent;
+  }
+  return candidate;
+}
 
 /**
  * The workspace roots a call needs: always the invoking cwd (so writes under it
  * pass), plus the directory of any output path argument (so a write outside cwd,
  * e.g. `$HOME/a.png`, passes too).
  */
-export function collectRootDirs(args: Record<string, unknown>): string[] {
+export function collectRootDirs(
+  name: string,
+  args: Record<string, unknown>,
+): string[] {
   const dirs = new Set<string>([process.cwd()]);
-  for (const key of FILE_PATH_ARG_KEYS) {
+  for (const key of FILE_OUTPUT_ARGS_BY_TOOL.get(name) ?? []) {
     const value = args[key];
-    if (typeof value === "string" && value.length > 0) dirs.add(dirname(value));
+    if (typeof value === "string" && value.length > 0) {
+      dirs.add(nearestExistingAncestor(dirname(value)));
+    }
   }
-  for (const key of DIR_PATH_ARG_KEYS) {
+  for (const key of DIR_OUTPUT_ARGS_BY_TOOL.get(name) ?? []) {
     const value = args[key];
-    if (typeof value === "string" && value.length > 0) dirs.add(value);
+    if (typeof value === "string" && value.length > 0) {
+      dirs.add(nearestExistingAncestor(value));
+    }
   }
   return [...dirs];
 }
@@ -592,7 +613,7 @@ export async function callTool(
   try {
     const resolved = resolveToolArgs(name, args);
     const result = await postTool(port, name, resolved, {
-      roots: collectRootDirs(resolved),
+      roots: collectRootDirs(name, resolved),
     });
     rememberToolRouting(name, resolved, result);
     return result;
